@@ -1,0 +1,376 @@
+# Modeling the carbon cycle of the UW-Madison Arboretum forests 
+# Arielle Link, Corinne Moss, Cara Thiesen 
+
+# This R Shiny app was simulates changes in three major carbon pools:
+#   1. Atmosphere
+#   2. Land biota 
+#   3. Soil
+
+# and three carbon fluxes:
+#   1. Photosynthesis
+#   2. Respiration
+#   3. Decomposition
+
+# The default parameter values were developed using estimates representative of forests at the UW-Madison Arboretum and the climate of southern Wisconsin.
+
+
+## 1. Install and load packages
+## --------------------
+install.packages(shiny)
+install.packages(ggplot2)
+
+library(shiny)
+library(ggplot2)
+
+# If you want to publish the app online using shinyapps.io, you will need the rsconnect package:
+install.packages("rsconnect")
+
+library(rsconnect)
+
+
+## ----------------------------
+## 2. Baseline climate conditions 
+
+# These values are based on the annual average temperature and precipitation in southern WI
+
+# INSTRUCTOR NOTE:
+# Replace these values with representative conditions for the ecosystem or geographic region being modeled
+
+
+baseline_temp <- 8.6      # (°C)
+baseline_precip <- 94     # (cm/yr)
+
+
+# ============================================================
+# 3. User Interface (UI)
+# The UI defines what users see and interact with in the app.
+# Carbon pool units are megagrams of carbon
+# Carbon flux units are megagrams or carbon per year 
+
+ui <- fluidPage(
+
+  # Make the app fit the screen better
+  tags$head(
+    tags$style(HTML("
+      body {
+        font-size: 12px;
+      }
+
+      .container-fluid {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+
+      .sidebar {
+        padding: 10px;
+      }
+
+      .main-panel {
+        padding: 10px;
+      }
+
+      .form-group {
+        margin-bottom: 8px;
+      }
+
+      h4 {
+        margin-top: 10px;
+        margin-bottom: 8px;
+      }
+
+      .shiny-plot-output {
+        height: 350px !important;
+        }
+
+      .btn {
+        margin-bottom: 5px;
+      }
+    "))
+  ),
+  # Title displayed at the top of the application
+  titlePanel("Carbon Cycling - UW-Madison Arboretum Forests"),
+  sidebarLayout(
+    sidebarPanel(
+      #Define baseline conditions
+      h4("Parameters"),
+      # Number of years 
+      numericInput("input_time", "Simulation Time (years):", value = 10, min = 1, max = 100), 
+      # Initial temperature
+      numericInput("input_temperature", "Temperature (°C):", value = 8.6),
+      # Initial precipitation 
+      numericInput("input_precipitation", "Precipitation (cm/yr):", value = 94), 
+      br(),
+      # Define the intial amount of carbon in each pool.
+      h4("Initial Carbon Pools (Mg C)"),
+      # Atmospheric carbon
+      numericInput("input_atmosphere_C", "Atmospheric C:", value = 30000),
+      # Carbon stored in living vegetation
+      numericInput("input_landbiota_C", "Land Biota C:", value = 6000),    
+      # Carbon stored in soil
+      numericInput("input_soilC", "Soil C:", value = 5000), 
+      br(),
+      # Define the starting annual rates of carbon fluxes among pools
+      h4("Initial Carbon Fluxes (Mg C/yr)"),  
+      # Carbon entering the ecosystem through photosynthesis
+      sliderInput("input_photosynthesis", "Photosynthesis:", min = 0, max = 500, value = 400),
+      # Carbon leaving vegetation through respiration
+      sliderInput("input_landBiota_respiration", "Respiration:", min = 0, max = 250, value = 200),
+      # Carbon leaving soil through decomposition
+      sliderInput("input_decomposition", "Decomposition:", min = 0, max = 200, value = 150),  
+      br(),
+      # Button that runs the simulation
+      actionButton("update_plots", "Run Simulation"), 
+      # Button that returns all inputs to their original values
+      actionButton(
+        "reset_button",
+        "Reset to Initial Conditions"
+      )
+    ),
+    mainPanel(
+      plotOutput("stock_plot"),
+      plotOutput("flux_plot"),
+      h4("Climate-Adjusted Fluxes (Mg C/yr)"),
+      tableOutput("initial_flux_values")
+      
+    )
+  )
+)
+
+
+
+# ============================================================
+# 4. Server
+
+# The server contains the calculations that run when users interact with the application.
+
+server <- function(input, output, session) {
+  
+  # Create storage for simulation results. This allows the app to store results and update the plots each time a new simulation is run 
+  sim_data <- reactiveValues()
+  
+  # Climate response multiplier 
+  # Calculate how a change in temperature or precipitations changes a carbon cycle flux 
+  # This function returns a multiplier centered at a baseline. It uses the baseline as a reference. The multiplier increases as conditions approach an optium (e.g., 15 C for temperature), after which it decreases as conditions move beyond that optimum. There is a lower limit on the response at the minimum and maximum environmental conditions so the fluxes do not reach 0, or go beyond the capabilities of the model. 
+  
+  # Modify the following arguments to represent a different ecosystem
+  # x          = environmental variable (temperature or precipitation)
+  # baseline   = baseline environmental condition
+  # x_opt      = assumed optimum
+  # x_min      = minimum environmental value
+  # x_max      = maximum environmental value
+  # max_increase = maximum fractional increase in the flux (e.g., 0.8 = +80%)
+  # litterfall_rate = Fixed fraction of land biota carbon transferred to soil each year
+  litterfall_rate <- 0.02
+  
+  climate_response_multiplier <- function(x, baseline, x_opt, x_min, x_max, max_increase = .5) {
+    if (x <= x_min || x >= x_max) {
+      # Minimum multiplier at extremes
+      return(1 - max_increase)  
+    } else if (x < x_opt) {
+      # Increase the response linearly from baseline to optimum
+      frac <- (x - baseline) / (x_opt - baseline)
+      return(1 + max_increase * frac)
+    } else {
+      # Decrease the response linearly from optimum back toward minimum 
+      frac <- (x_max - x) / (x_max - x_opt)
+      return(1 + max_increase * frac)
+    }
+  }
+  
+  ### Define how simulation runs ###
+  observeEvent(input$update_plots, {
+    # Create time vector 
+    time <- seq(0, input$input_time, by = 1)
+    n <- length(time)
+    
+    # Create empty carbon pools vector
+    atmosphere_C <- numeric(n)
+    land_biota_C <- numeric(n)
+    soil_C <- numeric(n)
+    
+    # Set initial carbon pools 
+    atmosphere_C[1] <- input$input_atmosphere_C
+    land_biota_C[1] <- input$input_landbiota_C
+    soil_C[1] <- input$input_soilC
+    
+    # Calculate climate multipliers 
+    temp_mult <- climate_response_multiplier(
+      x = input$input_temperature,
+      baseline = baseline_temp,
+      x_opt = 15,
+      x_min = 0,
+      x_max = 60,
+      max_increase = .8
+    )
+    
+    precip_mult <- climate_response_multiplier(
+      x = input$input_precipitation,
+      baseline = baseline_precip,
+      x_opt = 150,
+      x_min = 0,
+      x_max = 300,
+      max_increase = 0.2
+    )
+    
+    combined_mult <- temp_mult * precip_mult  #combined temp and precip climate multipliers 
+    
+    # Apply the climate multiplier to the initial fluxes.
+    photosynthesis <- input$input_photosynthesis * combined_mult
+    respiration <- input$input_landBiota_respiration * combined_mult
+    decomposition <- input$input_decomposition * combined_mult
+    
+    # Repeat for time steps
+    photosynthesis <- rep(photosynthesis, n)
+    respiration <- rep(respiration, n)
+    decomposition <- rep(decomposition, n)
+    
+    
+    ## Simulation loop ##
+    for (i in 2:n) {
+      
+      # Photosynthesis: increases or decreases in proportion to the amount of carbon stored in land biota
+      #photo <- photosynthesis[1] * (land_biota_C[i-1] / input$input_landbiota_C)
+      # Respiration also changes in proportion to the amount of carbon stored in land biota.
+      #resp <- respiration[1] * (land_biota_C[i-1] / input$input_landbiota_C)
+      # Decomposition changes in proportion to the amount of carbon stored in soil
+      #decomp <- decomposition[1] * (soil_C[i-1] / input$input_soilC)
+      
+      photo <- photosynthesis[1] * 
+        sqrt(land_biota_C[i-1] / input$input_landbiota_C)
+      
+      resp <- respiration[1] * 
+        sqrt(land_biota_C[i-1] / input$input_landbiota_C)
+      
+      decomp <- decomposition[1] * 
+        sqrt(soil_C[i-1] / input$input_soilC)
+      
+      # Store fluxes for plotting
+      photosynthesis[i] <- photo
+      respiration[i] <- resp
+      decomposition[i] <- decomp
+      
+      # Carbon trasnferred from land biota to soil through litterfall 
+      litterfall <- land_biota_C[i-1] * litterfall_rate
+      
+      # Update land biota C   
+      # Land biota C = previous land biota C + C allocated from photosynthesis - respiration - litterfall 
+      land_biota_C[i] <- max(0, land_biota_C[i-1] + photo - resp - litterfall)
+      
+      # Update soil C
+      # Soil C = prevvious soil C  + litterfall C - decomposition
+      soil_C[i]       <- max(0, soil_C[i-1] + litterfall - decomp)
+      
+      # Update atmospheric C
+      # Atmospheric C = previous atmospheric C - photosynthesis + respiration + decomposition
+      atmosphere_C[i] <- max(0, atmosphere_C[i-1] - photo + resp + decomp) 
+    }
+    
+    # Store results
+    sim_data$time <- time
+    sim_data$stocks <- data.frame(
+      Year = time,
+      Atmosphere = atmosphere_C,
+      LandBiota = land_biota_C,
+      Soil = soil_C
+    )
+    sim_data$fluxes <- data.frame(
+      Year = time,
+      Photosynthesis = photosynthesis,
+      Respiration = respiration,
+      Decomposition = decomposition
+      
+    )
+  })
+  
+  ## Add in reset button
+  # Returns all values to the baseline
+  observeEvent(input$reset_button, {
+    updateNumericInput(session, "input_time", value = 10)
+    updateNumericInput(session, "input_temperature", value = 8.6)
+    updateNumericInput(session, "input_precipitation", value = 94)
+    
+    updateNumericInput(session, "input_atmosphere_C", value = 30000)
+    updateNumericInput(session, "input_landbiota_C", value = 6000)
+    updateNumericInput(session, "input_soilC", value = 5000)
+    
+    updateSliderInput(session, "input_photosynthesis", value = 400)
+    updateSliderInput(session, "input_landBiota_respiration", value = 200)
+    updateSliderInput(session, "input_decomposition", value = 150)
+  })
+  
+  
+  # Carbon pool plot 
+  # Displays changes in the three carbon pools over time 
+  output$stock_plot <- renderPlot({
+    req(sim_data$stocks)
+    matplot(sim_data$stocks$Year, sim_data$stocks[, -1], type = "l", lwd = 4, 
+            col = c("deepskyblue", "darkgreen", "brown"),
+            lty=c(1,2,3), #different line types
+            ylab = "Carbon Pool (Mg C)", xlab = "Year",
+            ylim = range(sim_data$stocks[, -1], na.rm = TRUE) * c(0.95, 1.05)
+    )
+    legend("topright", legend = c("Atmosphere", "Land Biota", "Soil"),
+           col = c("deepskyblue", "darkgreen", "brown"), 
+           lty=c(1,2,3),
+           lwd = 4)
+  })
+  
+  # Carbon flux plot 
+  # Displays changes in the three carbon fluxes over time 
+  output$flux_plot <- renderPlot({
+    req(sim_data$fluxes)
+    matplot(sim_data$fluxes$Year, sim_data$fluxes[, -1], type = "l", lwd = 4,
+            col = c("purple", "blue", "red"),
+            lty=c(1,2,3),
+            ylab = "Carbon Flux (Mg C/yr)", xlab = "Year",
+            ylim = range(sim_data$fluxes[, -1], na.rm = TRUE) * c(0.95, 1.05)
+    )
+    legend("topright", legend = c("Photosynthesis", "Respiration", "Decomposition"),
+           col = c("purple", "blue", "red"), 
+           lty=c(1,2,3),
+           lwd = 4)
+  })
+  
+  
+  ## Climate adjusted flux table
+  # This table displays the initial flux values after accounting for the selected temperature and precipitation 
+  
+  output$initial_flux_values <- renderTable({
+    temp_effect <- climate_response_multiplier(
+      x = input$input_temperature,
+      baseline = baseline_temp,
+      x_opt = 15,
+      x_min = 0,
+      x_max = 60,
+      max_increase = .5
+    )
+    precip_effect <- climate_response_multiplier(
+      x = input$input_precipitation,
+      baseline = baseline_precip,
+      x_opt = 150,
+      x_min = 0,
+      x_max = 300,
+      max_increase = 0.2
+    )
+    
+    # Calculate the climate adjusted fluxes for the table
+    
+    adjusted_photosynthesis <- input$input_photosynthesis * temp_effect * precip_effect
+    adjusted_respiration <- input$input_landBiota_respiration * temp_effect * precip_effect
+    adjusted_decomposition <- input$input_decomposition * temp_effect * precip_effect
+    
+    data.frame(
+      Flux = c("Photosynthesis", "Respiration", "Decomposition"),
+      `Adjusted Value` = round(c(adjusted_photosynthesis, adjusted_respiration, adjusted_decomposition), 2)
+      
+    )
+  })
+}  
+
+
+# ============================================================
+# 5. Run the application 
+
+shinyApp(
+  ui = ui,
+  server = server)
