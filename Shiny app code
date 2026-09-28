@@ -101,6 +101,7 @@ ui <- fluidPage(
       numericInput("input_precipitation", "Precipitation (cm/yr):", value = 94), 
       br(),
       # Define the intial amount of carbon in each pool.
+# INSTRUCTOR NOTE: Replace the initial amount of carbon in each pool with values representative of your ecosystem. Adjust the minimum and maximum values accordingly. 
       h4("Initial Carbon Pools (Mg C)"),
       # Atmospheric carbon
       numericInput("input_atmosphere_C", "Atmospheric C:", value = 30000),
@@ -152,7 +153,7 @@ server <- function(input, output, session) {
   # Calculate how a change in temperature or precipitations changes a carbon cycle flux 
   # This function returns a multiplier centered at a baseline. It uses the baseline as a reference. The multiplier increases as conditions approach an optium (e.g., 15 C for temperature), after which it decreases as conditions move beyond that optimum. There is a lower limit on the response at the minimum and maximum environmental conditions so the fluxes do not reach 0, or go beyond the capabilities of the model. 
   
-  # Modify the following arguments to represent a different ecosystem
+# INSTRUCTOR NOTE: Modify the following arguments to represent a different ecosystem
   # x          = environmental variable (temperature or precipitation)
   # baseline   = baseline environmental condition
   # x_opt      = assumed optimum
